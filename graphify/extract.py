@@ -1700,6 +1700,308 @@ def extract_verilog(path: Path) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
+def extract_vb(path: Path) -> dict:
+    """Extract classes, modules, functions/subs, imports, inherits, implements, and handles from a .vb file."""
+    import re
+    try:
+        src = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"error": f"cannot read {path}"}
+
+    file_nid = _make_id(str(path))
+    nodes = [{"id": file_nid, "label": path.name, "file_type": "code",
+              "source_file": str(path), "source_location": None}]
+    edges = []
+    defined: set[str] = set()
+
+    # Classes
+    for m in re.finditer(r"^\s*(?:Public\s+|Private\s+|Friend\s+|Protected\s+)?Class\s+(\w+)", src, re.MULTILINE):
+        nid = _make_id(str(path), m.group(1))
+        if nid not in defined:
+            nodes.append({"id": nid, "label": m.group(1), "file_type": "code",
+                          "source_file": str(path), "source_location": None})
+            edges.append({"source": file_nid, "target": nid, "relation": "defines",
+                          "confidence": "EXTRACTED", "confidence_score": 1.0,
+                          "source_file": str(path), "source_location": None, "weight": 1.0})
+            defined.add(nid)
+
+    # Modules
+    for m in re.finditer(r"^\s*(?:Public\s+|Private\s+|Friend\s+)?Module\s+(\w+)", src, re.MULTILINE):
+        nid = _make_id(str(path), m.group(1))
+        if nid not in defined:
+            nodes.append({"id": nid, "label": m.group(1), "file_type": "code",
+                          "source_file": str(path), "source_location": None})
+            edges.append({"source": file_nid, "target": nid, "relation": "defines",
+                          "confidence": "EXTRACTED", "confidence_score": 1.0,
+                          "source_file": str(path), "source_location": None, "weight": 1.0})
+            defined.add(nid)
+
+    # Functions / Subs
+    for m in re.finditer(
+        r"^\s*(?:Public\s+|Private\s+|Friend\s+|Protected\s+)?(?:Overridable\s+|Overrides\s+|Overloads\s+|Shared\s+|Static\s+)?(?:Function|Sub)\s+(\w+)",
+        src, re.MULTILINE
+    ):
+        nid = _make_id(str(path), m.group(1))
+        if nid not in defined:
+            nodes.append({"id": nid, "label": m.group(1), "file_type": "code",
+                          "source_file": str(path), "source_location": None})
+            edges.append({"source": file_nid, "target": nid, "relation": "contains",
+                          "confidence": "EXTRACTED", "confidence_score": 1.0,
+                          "source_file": str(path), "source_location": None, "weight": 1.0})
+            defined.add(nid)
+
+    # Imports
+    for m in re.finditer(r"^\s*Imports\s+(.+)$", src, re.MULTILINE):
+        for item in m.group(1).split(","):
+            name = item.strip()
+            if not name:
+                continue
+            nid = _make_id(name)
+            if nid not in defined:
+                nodes.append({"id": nid, "label": name, "file_type": "code",
+                              "source_file": str(path), "source_location": None})
+                defined.add(nid)
+            edges.append({"source": file_nid, "target": nid, "relation": "imports",
+                          "confidence": "EXTRACTED", "confidence_score": 1.0,
+                          "source_file": str(path), "source_location": None, "weight": 1.0})
+
+    # Inherits
+    for m in re.finditer(r"^\s*Inherits\s+(\w+)", src, re.MULTILINE):
+        nid = _make_id(m.group(1))
+        if nid not in defined:
+            nodes.append({"id": nid, "label": m.group(1), "file_type": "code",
+                          "source_file": str(path), "source_location": None})
+            defined.add(nid)
+        edges.append({"source": file_nid, "target": nid, "relation": "inherits",
+                      "confidence": "EXTRACTED", "confidence_score": 1.0,
+                      "source_file": str(path), "source_location": None, "weight": 1.0})
+
+    # Implements
+    for m in re.finditer(r"^\s*Implements\s+(.+)$", src, re.MULTILINE):
+        for item in m.group(1).split(","):
+            name = item.strip()
+            if not name:
+                continue
+            nid = _make_id(name)
+            if nid not in defined:
+                nodes.append({"id": nid, "label": name, "file_type": "code",
+                              "source_file": str(path), "source_location": None})
+                defined.add(nid)
+            edges.append({"source": file_nid, "target": nid, "relation": "implements",
+                          "confidence": "EXTRACTED", "confidence_score": 1.0,
+                          "source_file": str(path), "source_location": None, "weight": 1.0})
+
+    # Handles clause (event handlers inside Sub/Function)
+    xaml_path = None
+    if path.suffix == ".vb" and path.name.endswith(".xaml.vb"):
+        xaml_path = path.with_name(path.stem)
+
+    for m in re.finditer(r"Handles\s+([\w.]+(?:\s*,\s*[\w.]+)*)", src):
+        handles_clause = m.group(1)
+        # Find the method name on the same line
+        line_start = src.rfind('\n', 0, m.start()) + 1
+        line_end = src.find('\n', m.end())
+        line_text = src[line_start:line_end if line_end != -1 else len(src)]
+        method_match = re.search(r"(?:Sub|Function)\s+(\w+)", line_text)
+        method_name = method_match.group(1) if method_match else None
+
+        for name in handles_clause.split(","):
+            name = name.strip()
+            nid = _make_id(name)
+            if nid not in defined:
+                nodes.append({"id": nid, "label": name, "file_type": "code",
+                              "source_file": str(path), "source_location": None})
+                defined.add(nid)
+            edges.append({"source": file_nid, "target": nid, "relation": "handles",
+                          "confidence": "EXTRACTED", "confidence_score": 1.0,
+                          "source_file": str(path), "source_location": None, "weight": 1.0})
+
+            # Cross-link to XAML control node when this is a code-behind file
+            if xaml_path and method_name:
+                parts = name.split(".")
+                if len(parts) >= 2:
+                    control_name = parts[-2]
+                    if control_name.lower() == "me" and len(parts) >= 3:
+                        control_name = parts[-3]
+                else:
+                    control_name = name
+                control_nid = _make_id(str(xaml_path), control_name)
+                if control_nid not in defined:
+                    nodes.append({"id": control_nid, "label": control_name, "file_type": "code",
+                                  "source_file": str(path), "source_location": None})
+                    defined.add(control_nid)
+                method_nid = _make_id(str(path), method_name)
+                edges.append({"source": method_nid, "target": control_nid, "relation": "handles",
+                              "confidence": "EXTRACTED", "confidence_score": 1.0,
+                              "source_file": str(path), "source_location": None, "weight": 1.0})
+
+    # ── Call-edge extraction ──────────────────────────────────────────────
+    # Build a map of known callable names (defined in this file) -> nid
+    callable_nids: dict[str, str] = {}
+    for n in nodes:
+        if n["id"] != file_nid:
+            callable_nids[n["label"].lower()] = n["id"]
+
+    skip_keywords = {
+        "if", "for", "while", "select", "case", "catch", "try", "using",
+        "synclock", "raiseevent", "gettype", "ctype", "directcast", "trycast",
+        "cint", "cstr", "cdbl", "cbool", "cbyte", "cchar", "cdate", "cdec",
+        "clng", "cobj", "cshort", "csng", "cuint", "culng", "cushort",
+        "new", "return", "throw", "typeof", "sizeof", "addressof",
+        "getxmlnamespace", "andalso", "orelse", "not", "mod", "like",
+        "is", "isnot", "get", "set", "let", "addhandler", "removehandler"
+    }
+
+    func_pattern = re.compile(
+        r"^\s*(?:Public\s+|Private\s+|Friend\s+|Protected\s+)?"
+        r"(?:Overridable\s+|Overrides\s+|Overloads\s+|Shared\s+|Static\s+)?"
+        r"(?:Function|Sub)\s+(\w+)",
+        re.MULTILINE
+    )
+
+    for m in func_pattern.finditer(src):
+        func_name = m.group(1)
+        caller_nid = _make_id(str(path), func_name)
+        if caller_nid not in defined:
+            continue
+
+        # Body starts after the declaration line
+        body_start = src.find('\n', m.end())
+        if body_start == -1:
+            continue
+
+        # Find the matching End Function / End Sub
+        end_match = re.search(
+            r"\n\s*End\s+(?:Function|Sub)\s*",
+            src[body_start:]
+        )
+        if not end_match:
+            continue
+        body = src[body_start:body_start + end_match.start()]
+
+        # Pattern 1: explicit Call statements
+        for call_m in re.finditer(r"\bCall\s+(\w+)", body):
+            callee = call_m.group(1).lower()
+            callee_nid = callable_nids.get(callee)
+            if callee_nid and callee_nid != caller_nid:
+                edges.append({
+                    "source": caller_nid, "target": callee_nid, "relation": "calls",
+                    "confidence": "EXTRACTED", "confidence_score": 1.0,
+                    "source_file": str(path), "source_location": None, "weight": 1.0
+                })
+
+        # Pattern 2: identifier followed by '('
+        for call_m in re.finditer(r"\b(\w+)\s*\(", body):
+            callee = call_m.group(1).lower()
+            if callee in skip_keywords:
+                continue
+            callee_nid = callable_nids.get(callee)
+            if callee_nid and callee_nid != caller_nid:
+                edges.append({
+                    "source": caller_nid, "target": callee_nid, "relation": "calls",
+                    "confidence": "EXTRACTED", "confidence_score": 1.0,
+                    "source_file": str(path), "source_location": None, "weight": 1.0
+                })
+
+        # Pattern 3: member access like obj.Method(
+        for call_m in re.finditer(r"\.(\w+)\s*\(", body):
+            callee = call_m.group(1).lower()
+            if callee in skip_keywords:
+                continue
+            callee_nid = callable_nids.get(callee)
+            if callee_nid and callee_nid != caller_nid:
+                edges.append({
+                    "source": caller_nid, "target": callee_nid, "relation": "calls",
+                    "confidence": "EXTRACTED", "confidence_score": 1.0,
+                    "source_file": str(path), "source_location": None, "weight": 1.0
+                })
+
+    return {"nodes": nodes, "edges": edges}
+
+
+def extract_xaml(path: Path) -> dict:
+    """Extract x:Class, x:Name, event handlers, StaticResource, and DataTemplate bindings from a .xaml file."""
+    import re
+    try:
+        src = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"error": f"cannot read {path}"}
+
+    file_nid = _make_id(str(path))
+    nodes = [{"id": file_nid, "label": path.name, "file_type": "code",
+              "source_file": str(path), "source_location": None}]
+    edges = []
+    defined: set[str] = set()
+
+    codebehind = path.with_name(path.stem + ".xaml.vb")
+
+    # x:Class (code-behind class)
+    for m in re.finditer(r'x:Class="([^"]+)"', src):
+        full_class = m.group(1)
+        class_name = full_class.split(".")[-1]
+        nid = _make_id(str(codebehind), class_name)
+        if nid not in defined:
+            nodes.append({"id": nid, "label": class_name, "file_type": "code",
+                          "source_file": str(path), "source_location": None})
+            defined.add(nid)
+        edges.append({"source": file_nid, "target": nid, "relation": "defines",
+                      "confidence": "EXTRACTED", "confidence_score": 1.0,
+                      "source_file": str(path), "source_location": None, "weight": 1.0})
+
+    # x:Name (named controls)
+    last_name_nid = None
+    for m in re.finditer(r'x:Name="([^"]+)"', src):
+        nid = _make_id(str(path), m.group(1))
+        if nid not in defined:
+            nodes.append({"id": nid, "label": m.group(1), "file_type": "code",
+                          "source_file": str(path), "source_location": None})
+            defined.add(nid)
+        edges.append({"source": file_nid, "target": nid, "relation": "contains",
+                      "confidence": "EXTRACTED", "confidence_score": 1.0,
+                      "source_file": str(path), "source_location": None, "weight": 1.0})
+        last_name_nid = nid
+
+    # Event handlers
+    for m in re.finditer(
+        r'\b(Click|Loaded|Unloaded|SelectionChanged|TextChanged|MouseDown|MouseUp|KeyDown|KeyUp|Closing|Initialized|SizeChanged)\s*=\s*"([^"]+)"',
+        src
+    ):
+        handler = m.group(2)
+        handler_nid = _make_id(str(codebehind), handler)
+        if handler_nid not in defined:
+            nodes.append({"id": handler_nid, "label": handler, "file_type": "code",
+                          "source_file": str(path), "source_location": None})
+            defined.add(handler_nid)
+        src_nid = last_name_nid if last_name_nid else file_nid
+        edges.append({"source": src_nid, "target": handler_nid, "relation": "binds_method",
+                      "confidence": "EXTRACTED", "confidence_score": 1.0,
+                      "source_file": str(path), "source_location": None, "weight": 1.0})
+
+    # StaticResource references
+    for m in re.finditer(r'StaticResource\s+(\w+)', src):
+        nid = _make_id(m.group(1))
+        if nid not in defined:
+            nodes.append({"id": nid, "label": m.group(1), "file_type": "code",
+                          "source_file": str(path), "source_location": None})
+            defined.add(nid)
+        edges.append({"source": file_nid, "target": nid, "relation": "uses_resource",
+                      "confidence": "EXTRACTED", "confidence_score": 1.0,
+                      "source_file": str(path), "source_location": None, "weight": 1.0})
+
+    # DataTemplate bindings
+    for m in re.finditer(r'\{Binding\s+([^},\s]+)', src):
+        nid = _make_id(m.group(1))
+        if nid not in defined:
+            nodes.append({"id": nid, "label": m.group(1), "file_type": "code",
+                          "source_file": str(path), "source_location": None})
+            defined.add(nid)
+        edges.append({"source": file_nid, "target": nid, "relation": "binds_to",
+                      "confidence": "EXTRACTED", "confidence_score": 1.0,
+                      "source_file": str(path), "source_location": None, "weight": 1.0})
+
+    return {"nodes": nodes, "edges": edges}
+
+
 def extract_lua(path: Path) -> dict:
     """Extract functions, methods, require() imports, and calls from a .lua file."""
     return _extract_generic(path, _LUA_CONFIG)
@@ -3322,6 +3624,8 @@ def extract(paths: list[Path], cache_root: Path | None = None) -> dict:
         ".dart": extract_dart,
         ".v": extract_verilog,
         ".sv": extract_verilog,
+        ".vb": extract_vb,
+        ".xaml": extract_xaml,
     }
 
     total = len(paths)
