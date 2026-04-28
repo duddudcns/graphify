@@ -1835,8 +1835,35 @@ def extract_vb(path: Path) -> dict:
                               "confidence": "EXTRACTED", "confidence_score": 1.0,
                               "source_file": str(path), "source_location": None, "weight": 1.0})
 
+    # AddHandler dynamic event binding (cross-link to XAML control when in code-behind)
+    if xaml_path:
+        for ah in re.finditer(r"AddHandler\s+([\w.]+)\s*,\s*AddressOf\s+(\w+)", src):
+            source = ah.group(1)
+            handler_name = ah.group(2)
+            parts = source.split(".")
+            if len(parts) >= 2:
+                control_name = parts[-2]
+                if control_name.lower() == "me" and len(parts) >= 3:
+                    control_name = parts[-3]
+            else:
+                control_name = source
+            control_nid = _make_id(str(xaml_path), control_name)
+            if control_nid not in defined:
+                nodes.append({"id": control_nid, "label": control_name, "file_type": "code",
+                              "source_file": str(path), "source_location": None})
+                defined.add(control_nid)
+            handler_nid = _make_id(str(path), handler_name)
+            if handler_nid not in defined:
+                nodes.append({"id": handler_nid, "label": handler_name, "file_type": "code",
+                              "source_file": str(path), "source_location": None})
+                defined.add(handler_nid)
+            edges.append({"source": handler_nid, "target": control_nid, "relation": "binds_method",
+                          "confidence": "EXTRACTED", "confidence_score": 1.0,
+                          "source_file": str(path), "source_location": None, "weight": 1.0})
+
     # ── Call-edge extraction ──────────────────────────────────────────────
     # Build a map of known callable names (defined in this file) -> nid
+    raw_calls: list[dict] = []
     callable_nids: dict[str, str] = {}
     for n in nodes:
         if n["id"] != file_nid:
@@ -1889,6 +1916,13 @@ def extract_vb(path: Path) -> dict:
                     "confidence": "EXTRACTED", "confidence_score": 1.0,
                     "source_file": str(path), "source_location": None, "weight": 1.0
                 })
+            elif not callee_nid:
+                raw_calls.append({
+                    "caller_nid": caller_nid,
+                    "callee": call_m.group(1),
+                    "source_file": str(path),
+                    "source_location": None
+                })
 
         # Pattern 2: identifier followed by '('
         for call_m in re.finditer(r"\b(\w+)\s*\(", body):
@@ -1901,6 +1935,13 @@ def extract_vb(path: Path) -> dict:
                     "source": caller_nid, "target": callee_nid, "relation": "calls",
                     "confidence": "EXTRACTED", "confidence_score": 1.0,
                     "source_file": str(path), "source_location": None, "weight": 1.0
+                })
+            elif not callee_nid:
+                raw_calls.append({
+                    "caller_nid": caller_nid,
+                    "callee": call_m.group(1),
+                    "source_file": str(path),
+                    "source_location": None
                 })
 
         # Pattern 3: member access like obj.Method(
@@ -1915,8 +1956,46 @@ def extract_vb(path: Path) -> dict:
                     "confidence": "EXTRACTED", "confidence_score": 1.0,
                     "source_file": str(path), "source_location": None, "weight": 1.0
                 })
+            elif not callee_nid:
+                raw_calls.append({
+                    "caller_nid": caller_nid,
+                    "callee": call_m.group(1),
+                    "source_file": str(path),
+                    "source_location": None
+                })
 
-    return {"nodes": nodes, "edges": edges}
+    # Shared field / member reference extraction (Me.Field patterns)
+    me_fields: dict[str, str] = {}
+    for fm in re.finditer(r"\bMe\.(\w+)\b", src):
+        field_name = fm.group(1)
+        if fm.end() < len(src) and src[fm.end()] == '(':
+            continue
+        field_nid = _make_id(str(path), field_name)
+        if field_nid not in defined:
+            nodes.append({"id": field_nid, "label": field_name, "file_type": "code",
+                          "source_file": str(path), "source_location": None})
+            defined.add(field_nid)
+        me_fields[field_name.lower()] = field_nid
+
+    for m in func_pattern.finditer(src):
+        func_name = m.group(1)
+        caller_nid = _make_id(str(path), func_name)
+        if caller_nid not in defined:
+            continue
+        body_start = src.find('\n', m.end())
+        if body_start == -1:
+            continue
+        end_match = re.search(r"\n\s*End\s+(?:Function|Sub)\s*", src[body_start:])
+        if not end_match:
+            continue
+        body = src[body_start:body_start + end_match.start()]
+        for field_lower, field_nid in me_fields.items():
+            if re.search(rf"\bMe\.{re.escape(field_lower)}\b", body, re.IGNORECASE):
+                edges.append({"source": caller_nid, "target": field_nid, "relation": "references",
+                              "confidence": "INFERRED", "confidence_score": 0.7,
+                              "source_file": str(path), "source_location": None, "weight": 1.0})
+
+    return {"nodes": nodes, "edges": edges, "raw_calls": raw_calls}
 
 
 def extract_xaml(path: Path) -> dict:
