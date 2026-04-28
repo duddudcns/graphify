@@ -3822,6 +3822,19 @@ def extract(paths: list[Path], cache_root: Path | None = None) -> dict:
         except ValueError:
             pass
 
+    # Filter out system/framework namespace nodes that add noise without value
+    system_prefixes = ('system.', 'microsoft.', 'newtonsoft.')
+    kept_nodes: list[dict] = []
+    removed_ids: set[str] = set()
+    for n in all_nodes:
+        label = n.get('label', '')
+        if label and label.lower().startswith(system_prefixes):
+            removed_ids.add(n['id'])
+        else:
+            kept_nodes.append(n)
+    all_nodes = kept_nodes
+    all_edges = [e for e in all_edges if e.get('source') not in removed_ids and e.get('target') not in removed_ids]
+
     return {
         "nodes": all_nodes,
         "edges": all_edges,
